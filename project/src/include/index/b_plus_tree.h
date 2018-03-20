@@ -66,6 +66,16 @@ public:
   FindLeafPage(const KeyType &key, bool leftMost = false);
 
 private:
+  class Checker {
+  public:
+    explicit Checker(BufferPoolManager *b) : buffer(b) {}
+    ~Checker() {
+      assert(buffer->Check());
+    }
+  private:
+    BufferPoolManager *buffer;
+  };
+
   void StartNewTree(const KeyType &key, const ValueType &value);
 
   bool InsertIntoLeaf(const KeyType &key, const ValueType &value,
@@ -80,9 +90,15 @@ private:
   template <typename N>
   bool CoalesceOrRedistribute(N *node, Transaction *transaction = nullptr);
 
+  /*
   template <typename N>
   bool Coalesce(N *&neighbor_node, N *&node,
                 BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator> *&parent,
+                int index, Transaction *transaction = nullptr);
+  */
+  template <typename N>
+  void Coalesce(N *neighbor_node, N *node,
+                BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator> *parent,
                 int index, Transaction *transaction = nullptr);
 
   template <typename N> void Redistribute(N *neighbor_node, N *node, int index);

@@ -41,6 +41,9 @@ template <typename KeyType, typename ValueType, typename KeyComparator>
 bool BPlusTree<KeyType, ValueType, KeyComparator>::
 GetValue(const KeyType &key, std::vector<ValueType> &result,
          Transaction *transaction) {
+  // for debug
+  __attribute__((unused)) auto checker = Checker{buffer_pool_manager_};
+
   auto *leaf = FindLeafPage(key, false);
   bool ret = false;
   if (leaf != nullptr) {
@@ -67,6 +70,9 @@ GetValue(const KeyType &key, std::vector<ValueType> &result,
 template <typename KeyType, typename ValueType, typename KeyComparator>
 bool BPlusTree<KeyType, ValueType, KeyComparator>::
 Insert(const KeyType &key, const ValueType &value, Transaction *transaction) {
+  // for debug
+  __attribute__((unused)) auto checker = Checker{buffer_pool_manager_};
+
   if (IsEmpty()) {
     StartNewTree(key, value);
     return true;
@@ -284,6 +290,8 @@ InsertIntoParent(BPlusTreePage *old_node, const KeyType &key,
       // set new node's parent page id
       if (comparator_(key, internal2->KeyAt(0)) < 0) {
         new_node->SetParentPageId(internal->GetPageId());
+      } else if (comparator_(key, internal2->KeyAt(0)) == 0) {
+        new_node->SetParentPageId(internal2->GetPageId());
       } else {
         new_node->SetParentPageId(internal2->GetPageId());
         old_node->SetParentPageId(internal2->GetPageId());
@@ -316,9 +324,13 @@ InsertIntoParent(BPlusTreePage *old_node, const KeyType &key,
 template <typename KeyType, typename ValueType, typename KeyComparator>
 void BPlusTree<KeyType, ValueType, KeyComparator>::
 Remove(const KeyType &key, Transaction *transaction) {
+  // for debug
+  __attribute__((unused)) auto checker = Checker{buffer_pool_manager_};
+
   if (IsEmpty()) {
     return;
   }
+
   // find the leaf node
   auto *leaf = FindLeafPage(key, false);
   if (leaf != nullptr) {
@@ -331,6 +343,8 @@ Remove(const KeyType &key, Transaction *transaction) {
       buffer_pool_manager_->UnpinPage(leaf->GetPageId(), true);
     }
   }
+
+  Verify();
 }
 
 /*
@@ -359,6 +373,7 @@ CoalesceOrRedistribute(N *node, Transaction *transaction) {
     }
   }
 
+  // get parent first
   auto *page = buffer_pool_manager_->FetchPage(node->GetParentPageId());
   if (page == nullptr) {
     throw Exception(EXCEPTION_TYPE_INDEX,
@@ -370,6 +385,10 @@ CoalesceOrRedistribute(N *node, Transaction *transaction) {
                                              KeyComparator> *>(page->GetData());
   // sibling should has the same parent with node
   int value_index = parent->ValueIndex(node->GetPageId());
+
+  // when can't find, ValueIndex() will return GetSize();
+  assert(value_index != parent->GetSize());
+
   int sibling_page_id;
   if (value_index == 0) {
     sibling_page_id = parent->ValueAt(value_index + 1);
@@ -393,6 +412,9 @@ CoalesceOrRedistribute(N *node, Transaction *transaction) {
   // 3. but the condition for leaf/internal node is same
   if (sibling->GetSize() + node->GetSize() > node->GetMaxSize()) {
     redistribute = true;
+
+    // release parent
+    buffer_pool_manager_->UnpinPage(parent->GetPageId(), true);
   }
 
   // redistribute key-value pairs
@@ -403,30 +425,21 @@ CoalesceOrRedistribute(N *node, Transaction *transaction) {
       Redistribute<N>(sibling, node, 1);   // sibling is predecessor of node
     }
     buffer_pool_manager_->UnpinPage(sibling->GetPageId(), true);
-    buffer_pool_manager_->UnpinPage(parent->GetPageId(), true);
     return false;
   }
 
   // merge nodes: if node is the first child of its parent, swap node and
   // its sibling when call Coalesce for the assumption
   if (value_index == 0) {
-    if (Coalesce<N>(node, sibling, parent, 1, transaction)) {
-      buffer_pool_manager_->UnpinPage(parent->GetPageId(), false);
-      buffer_pool_manager_->DeletePage(parent->GetPageId());
-    } else {
-      buffer_pool_manager_->UnpinPage(parent->GetPageId(), true);
-    }
+    // it's Coalesce's responsibility to delete/save parent
+    Coalesce<N>(node, sibling, parent, 1, transaction);
+    buffer_pool_manager_->UnpinPage(sibling_page_id, false);
+    buffer_pool_manager_->DeletePage(sibling_page_id);
     // node should not be deleted
     return false;
   } else {
-    if (Coalesce<N>(sibling, node, parent, value_index, transaction)) {
-      buffer_pool_manager_->UnpinPage(parent->GetPageId(), false);
-      buffer_pool_manager_->DeletePage(parent->GetPageId());
-    } else {
-      buffer_pool_manager_->UnpinPage(parent->GetPageId(), true);
-    }
-
-    buffer_pool_manager_->UnpinPage(sibling->GetPageId(), true);
+    Coalesce<N>(sibling, node, parent, value_index, transaction);
+    buffer_pool_manager_->UnpinPage(sibling_page_id, true);
     // node should be deleted
     return true;
   }
@@ -446,9 +459,9 @@ CoalesceOrRedistribute(N *node, Transaction *transaction) {
  */
 template <typename KeyType, typename ValueType, typename KeyComparator>
 template <typename N>
-bool BPlusTree<KeyType, ValueType, KeyComparator>::
-Coalesce(N *&neighbor_node, N *&node,
-         BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator> *&parent,
+void BPlusTree<KeyType, ValueType, KeyComparator>::
+Coalesce(N *neighbor_node, N *node,
+         BPlusTreeInternalPage<KeyType, page_id_t, KeyComparator> *parent,
          int index, Transaction *transaction) {
 
   // assumption: neighbor_node is predecessor of node
@@ -462,8 +475,15 @@ Coalesce(N *&neighbor_node, N *&node,
     buffer_pool_manager_->UnpinPage(node->GetPageId(), false);
     buffer_pool_manager_->DeletePage(node->GetPageId());
   }
+
   // recursive
-  return CoalesceOrRedistribute(parent, transaction);
+  page_id_t page_id = parent->GetPageId();
+  if (CoalesceOrRedistribute(parent, transaction)) {
+    buffer_pool_manager_->UnpinPage(page_id, false);
+    buffer_pool_manager_->DeletePage(page_id);
+  } else {
+    buffer_pool_manager_->UnpinPage(page_id, true);
+  }
 }
 
 /*
@@ -605,20 +625,24 @@ FindLeafPage(const KeyType &key, bool leftMost) {
     auto internal =
         reinterpret_cast<BPlusTreeInternalPage<KeyType, page_id_t,
                                                KeyComparator> *>(node);
-    page_id_t next;
+    page_id_t parent_page_id = node->GetPageId(), child_page_id;
     if (leftMost) {
-      next = internal->ValueAt(0);
+      child_page_id = internal->ValueAt(0);
     } else {
-      next = internal->Lookup(key, comparator_);
+      child_page_id = internal->Lookup(key, comparator_);
     }
-    buffer_pool_manager_->UnpinPage(node->GetPageId(), false);
+    buffer_pool_manager_->UnpinPage(parent_page_id, false);
 
-    page = buffer_pool_manager_->FetchPage(next);
+    // find child
+    page = buffer_pool_manager_->FetchPage(child_page_id);
     if (page == nullptr) {
       throw Exception(EXCEPTION_TYPE_INDEX,
                       "all page are pinned while FindLeafPage");
     }
     node = reinterpret_cast<BPlusTreePage *>(page->GetData());
+
+    // must match
+    assert(node->GetParentPageId() == parent_page_id);
   }
   return reinterpret_cast<BPlusTreeLeafPage<KeyType,
                                             ValueType, KeyComparator> *>(node);
